@@ -1,97 +1,181 @@
+# =============================================================================
+# Fig. 4: cumulative distributions of RMSE (left) and velocity (right),
+# EGMS-PS vs PS+DS, all corridors in one figure.                (QGIS console)
+#
+# Computed directly from the POINT layers (rmse_c3s = EGMS-model RMSE), so the
+# QGIS grid-statistics layers do not have to be rebuilt.
+#   MODE = "grid"  : median per 100 m x 100 m cell (as in the original Fig. 4)
+#   MODE = "points": every measurement point
+# =============================================================================
+
+from qgis.core import QgsProject
 import matplotlib.pyplot as plt
-import pandas as pd
 import numpy as np
+import os
 
-# ---------------------------------------------------------
-# CONFIG
-# ---------------------------------------------------------
-egms_layer = "egms_kir_coh70_SW99TM_statGRD100"
-psds_layer = "PSDS_kir_coh70_SW99TM_statGRD100"
+# ----------------------------- CONFIG ----------------------------------------
+CASES = {
+    "Kiruna":     ("egms_kir_coh70_SW99TM",         "PSDS_kir_coh70_SW99TM"),
+    "Lilla Edet": ("egms_LE_coh70_SW99TM",          "PSDS_LE_coh70_SW99TM"),
+    "Lödöse":     ("egms_LOA_coh70_SW99TM",         "PSDS_LOA_coh70_SW99TM"),
+    "Gothenburg": ("egms_gbg_coh60_SW99TM_cor50",   "PSDS_gbg_coh60_SW99TM_cor50"),
+    "Stockholm":  ("egms_sthlm_coh60_SW99TM_cor50", "PSDS_sthlm_coh60_SW99TM_cor50"),
+}
+ORDER = ["Kiruna", "Lilla Edet", "Lödöse", "Gothenburg", "Stockholm"]
 
-# Field names
-EGMS_RMSE = "rmse_median"
-EGMS_velo  = "mean_veloc_median" #or stddev
+MODE  = "points"           # "grid" or "points"
+CELL  = 100.0            # m, grid cell size
+VEL_FIELDS  = {"egms": ["mean_velocity", "mean_veloc"], "psds": ["velocity", "vel"]}
+RMSE_FIELDS = ["rmse_c3s"]
 
-PSDS_RMSE = "rmse_median"
-PSDS_velo = "velocity_median"
+# PS+DS is relative to a scene reference point, EGMS is GNSS-calibrated. With
+# ALIGN = True the PS+DS velocities are shifted by the difference of the two
+# medians so the SHAPES of the distributions can be compared (the offset itself
+# is the datum difference discussed in Sect. 3.1). The shift is printed.
+ALIGN = True
 
-# ---------------------------------------------------------
-# HELPER: Load fields for whole layer
-# ---------------------------------------------------------
-def load_metrics(layer_name, rmse_field, velo_field):
-    layer = QgsProject.instance().mapLayersByName(layer_name)[0]
+RMSE_REF  = 4.0          # mm, vertical reference line + share annotated
+VEL_PCT   = (0.5, 99.5)  # velocity x-range per corridor (long tails clipped)
+RMSE_PCT  = 99.5         # common RMSE x-range top
 
-    records = []
-    fields = [f.name() for f in layer.fields()]
+OUT_DIR, NAME = "/Users/saam7695/Desktop/fig4", "Fig04"
+FORMATS, DPI, TRANSPARENT = ("pdf", "png"), 300, True
+FONT, BOLD, LW = 12, True, 2.0
+ROW_HEIGHT, WIDTH = 2.8, 12.0
+COL = {"egms": "tab:blue", "psds": "tab:orange"}
+LABELS = {"egms": "EGMS-PS", "psds": "PS+DS"}
+# -----------------------------------------------------------------------------
 
-    for feat in layer.getFeatures():
-        rec = dict(zip(fields, feat.attributes()))
-        records.append(rec)
 
-    df = pd.DataFrame(records)
+def layer(name):
+    ls = QgsProject.instance().mapLayersByName(name)
+    if not ls:
+        raise RuntimeError("Layer not found: %s" % name)
+    return ls[0]
 
-    # numeric conversion (keep NaN)
-    df[rmse_field] = pd.to_numeric(df[rmse_field], errors="coerce")
-    df[velo_field]  = pd.to_numeric(df[velo_field],  errors="coerce")
 
-    # remove NaN for analysis
-    rmse = df[rmse_field].dropna().to_numpy()
-    velo = df[velo_field].dropna().to_numpy()
+def field(lyr, candidates):
+    names = [f.name() for f in lyr.fields()]
+    for c in candidates:
+        if c in names:
+            return c
+    raise RuntimeError("%s: none of %s found" % (lyr.name(), candidates))
 
-    return rmse, velo
 
-# ---------------------------------------------------------
-# LOAD DATA
-# ---------------------------------------------------------
-egms_rmse, egms_velo = load_metrics(egms_layer, EGMS_RMSE, EGMS_velo)
-psds_rmse, psds_velo = load_metrics(psds_layer, PSDS_RMSE, PSDS_velo)
+def num(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return np.nan
 
-# ---------------------------------------------------------
-# HELPER: Compute CDF
-# ---------------------------------------------------------
-def compute_cdf(arr):
-    arr_sorted = np.sort(arr)
-    cdf_vals = np.arange(1, len(arr_sorted)+1) / len(arr_sorted)
-    return arr_sorted, cdf_vals
 
-# EGMS CDFs
-egms_rmse_x, egms_rmse_y = compute_cdf(egms_rmse)
-egms_velo_x,  egms_velo_y  = compute_cdf(egms_velo)
+def read_points(name, key):
+    lyr = layer(name)
+    vf, rf = field(lyr, VEL_FIELDS[key]), field(lyr, RMSE_FIELDS)
+    xy, vel, rmse = [], [], []
+    for f in lyr.getFeatures():
+        g = f.geometry()
+        if g is None or g.isEmpty():
+            continue
+        p = g.asPoint() if not g.isMultipart() else g.asMultiPoint()[0]
+        xy.append((p.x(), p.y())); vel.append(num(f[vf])); rmse.append(num(f[rf]))
+    return np.array(xy), np.array(vel), np.array(rmse)
 
-# PSDS CDFs
-psds_rmse_x, psds_rmse_y = compute_cdf(psds_rmse)
-psds_velo_x,  psds_velo_y  = compute_cdf(psds_velo)
 
-# ---------------------------------------------------------
-# PLOT
-# ---------------------------------------------------------
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 3))
-fig.patch.set_facecolor('none')
-# ==== PANEL 1: RMSE CDF ====
-ax1.plot(egms_rmse_x, egms_rmse_y, label="EGMS RMSE", color="tab:blue")
-ax1.plot(psds_rmse_x, psds_rmse_y, label="PSDS RMSE", color="tab:orange")
-ax1.set_facecolor('none') # Remove panel background
-ax1.set_title("a) Kiruna (RMSE)")
-ax1.set_xlabel("RMSE (mm)")
-ax1.set_ylabel("Cumulative Probability")
-ax1.grid(True, linestyle="--", alpha=0.4)
-ax1.legend()
+def grid_medians(xy, values):
+    """Median of each value array per CELL x CELL square (cells keyed by index)."""
+    ij = np.floor(xy / CELL).astype(np.int64)
+    key = ij[:, 0] * 10_000_000 + ij[:, 1]
+    order = np.argsort(key)
+    key_s = key[order]
+    bounds = np.flatnonzero(np.diff(key_s)) + 1
+    out = []
+    for v in values:
+        groups = np.split(v[order], bounds)
+        out.append(np.array([np.nanmedian(g) if np.isfinite(g).any() else np.nan
+                             for g in groups]))
+    return out
 
-# ==== PANEL 2: Velocity CDF ====
-ax2.plot(egms_velo_x, egms_velo_y, label="EGMS velocity", color="tab:blue")
-ax2.plot(psds_velo_x, psds_velo_y, label="PSDS velocity", color="tab:orange")
-ax2.set_facecolor('none') # Remove panel background
-ax2.set_title("b) Kiruna (Velocity)")
-ax2.set_xlabel("Velocity (mm/yr)")
-ax2.set_ylabel("Cumulative Probability")
-ax2.grid(True, linestyle="--", alpha=0.4)
-ax2.legend()
 
-# Set a common font size for all tick labels
-tick_font_size = 14 
+def cdf(a):
+    a = np.sort(a[np.isfinite(a)])
+    return a, np.arange(1, len(a) + 1) / len(a)
 
-ax1.tick_params(axis='both', which='major', labelsize=tick_font_size)
-ax2.tick_params(axis='both', which='major', labelsize=tick_font_size)
 
-plt.tight_layout()
+# ----------------------------- data ------------------------------------------
+data = {}
+for case in ORDER:
+    d = {}
+    for key, name in zip(("egms", "psds"), CASES[case]):
+        xy, v, r = read_points(name, key)
+        if MODE == "grid":
+            v, r = grid_medians(xy, (v, r))
+        d[key] = {"vel": v, "rmse": r}
+    shift = 0.0
+    if ALIGN:
+        shift = np.nanmedian(d["egms"]["vel"]) - np.nanmedian(d["psds"]["vel"])
+        d["psds"]["vel"] = d["psds"]["vel"] + shift
+    d["shift"] = shift
+    data[case] = d
+    s = ["%s: %s n=%d, median RMSE %.2f mm, <=%.0f mm %.0f%%"
+         % (case if k == "egms" else " " * len(case), LABELS[k],
+            np.isfinite(d[k]["rmse"]).sum(), np.nanmedian(d[k]["rmse"]), RMSE_REF,
+            100 * np.nanmean(d[k]["rmse"][np.isfinite(d[k]["rmse"])] <= RMSE_REF))
+         for k in ("egms", "psds")]
+    print("\n".join(s) + ("\n   PS+DS velocity shifted by %+.2f mm/yr" % shift if ALIGN else ""))
+
+
+# ----------------------------- plot ------------------------------------------
+if BOLD:
+    plt.rcParams.update({"font.weight": "bold", "axes.labelweight": "bold",
+                         "axes.titleweight": "bold"})
+n = len(ORDER)
+fig, axes = plt.subplots(n, 2, figsize=(WIDTH, ROW_HEIGHT * n), squeeze=False)
+if TRANSPARENT:
+    fig.patch.set_alpha(0)
+allr = np.concatenate([data[c][k]["rmse"] for c in ORDER for k in ("egms", "psds")])
+rmax = np.nanpercentile(allr, RMSE_PCT) * 1.05
+letters = iter("abcdefghijklmnopqrstuvwxyz")
+unit = "cells" if MODE == "grid" else "points"
+
+for row, case in enumerate(ORDER):
+    d = data[case]
+    axr, axv = axes[row]
+    for key in ("egms", "psds"):
+        x, y = cdf(d[key]["rmse"])
+        axr.plot(x, y, color=COL[key], lw=LW, label=LABELS[key])
+        x, y = cdf(d[key]["vel"])
+        axv.plot(x, y, color=COL[key], lw=LW, label=LABELS[key])
+    # RMSE panel
+    axr.axvline(RMSE_REF, color="0.4", ls=":", lw=1.2)
+    share = ["%s %.0f%%" % (LABELS[k], 100 * np.nanmean(
+        d[k]["rmse"][np.isfinite(d[k]["rmse"])] <= RMSE_REF)) for k in ("egms", "psds")]
+    axr.text(0.98, 0.06, "%s ≤ %.0f mm: %s" % (unit, RMSE_REF, ", ".join(share)),
+             transform=axr.transAxes, ha="right", va="bottom", fontsize=FONT - 2)
+    axr.set_xlim(0, rmax)
+    axr.set_title("%s) %s (RMSE)" % (next(letters), case), fontsize=FONT)
+    # velocity panel
+    allv = np.concatenate([d[k]["vel"] for k in ("egms", "psds")])
+    lo, hi = np.nanpercentile(allv, VEL_PCT)
+    pad = 0.05 * (hi - lo)
+    axv.set_xlim(lo - pad, hi + pad)
+    axv.set_title("%s) %s (velocity)" % (next(letters), case), fontsize=FONT)
+    for ax in (axr, axv):
+        ax.set_facecolor("none")
+        ax.set_ylim(0, 1.02)
+        ax.grid(True, ls="--", alpha=0.4)
+        ax.tick_params(labelsize=FONT)
+        ax.set_ylabel("Cumulative prob.", fontsize=FONT)
+    if row == n - 1:
+        axr.set_xlabel("RMSE (mm)", fontsize=FONT)
+        axv.set_xlabel("Velocity (mm/yr)" + (" — PS+DS aligned to EGMS median" if ALIGN else ""),
+                       fontsize=FONT)
+
+axes[0, 0].legend(loc="upper left", fontsize=FONT - 1, frameon=False)
+fig.tight_layout()
+os.makedirs(OUT_DIR, exist_ok=True)
+for ext in FORMATS:
+    p = os.path.join(OUT_DIR, "%s.%s" % (NAME, ext))
+    fig.savefig(p, dpi=DPI, transparent=TRANSPARENT, bbox_inches="tight")
+    print("Written: %s" % p)
 plt.show()
